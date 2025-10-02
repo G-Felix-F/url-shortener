@@ -1,22 +1,18 @@
-import { QueryResult } from './../node_modules/@types/pg/index.d';
 import { UrlData } from './model/url';
 import { isUrlValid } from './utils/urlUtils';
-import { initDb } from './migrations/001_init_db';
-import { pool } from './config/database';
 
 import express from 'express';
 import dotenv from 'dotenv';
 import cors from 'cors';
 import { randomBytes } from 'crypto';
+import { PrismaClient } from './generated/prisma';
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 dotenv.config({ path: '../.env' });
 
-(async () => {
-    await initDb();
-})();
+const prisma = new PrismaClient();
 
 app.post('/shorten', async (req, res) => {
     if (!req.body) {
@@ -33,55 +29,49 @@ app.post('/shorten', async (req, res) => {
     expiresAt.setDate(expiresAt.getDate() + 1);
 
     try {
-        const result = await pool.query(`
-            INSERT INTO urls_table (id, original_url, short_url, expires_at)
-            VALUES ($1, $2, $3, $4)
-            RETURNING *;
-        `, [id, originalUrl, shortUrl, expiresAt]);
+        const result = await prisma.url.create({
+            data: {
+                id: id,
+                originalUrl: originalUrl,
+                shortUrl: shortUrl,
+                expiresAt: expiresAt
+            }
+        });
 
-        return res.status(201).json(result.rows[0]);
+        return res.status(201).json(result);
     } catch (error) {
-        console.error('Error to inserting url: ', error);
-        res.status(500).json({ error: 'Error to inserting url' });
+        return res.status(500).json({ error: 'Error to inserting url' });
     }
 });
 
-app.get('/:shortUrl', async (req, res) => {
-    const { shortUrl } = req.params;
+app.get('/:id', async (req, res) => {
+    const { id } = req.params;
 
     try {
-        const result = await pool.query(`
-            SELECT * FROM urls_table WHERE short_url ILIKE $1;`,
-            [`%${shortUrl}`]
-        );
-
-        if (result.rowCount === 0) {
-            res.status(404).json({ error: 'Url not found' });
-        }
-
-        const resultFound = result.rows[0];
-        const url: UrlData = ({
-            id: resultFound.id,
-            originalUrl: resultFound.original_url,
-            shortUrl: resultFound.short_url,
-            expiresAt: resultFound.expires_at,
-            hits: resultFound.hits
+        const result = await prisma.url.findFirst({
+            where: { id: id }
         });
 
-        if (url.expiresAt <= new Date()) {
+        if (!result) {
+            return res.status(404).json({ error: 'Url not found' });
+        }
+
+        if (result.expiresAt <= new Date()) {
             return res.status(410).json({ error: 'Url expired' });
         }
 
-        await pool.query(`
-            UPDATE urls_table SET hits = hits + 1 WHERE short_url ILIKE $1;`,
-            [`%${shortUrl}`]
-        );
+        await prisma.url.update({
+            where: { id: result.id },
+            data: {
+                hits: { increment: 1 }
+            }
+        });
 
-        res.redirect(url.originalUrl);
+        return res.redirect(result.originalUrl);
 
     } catch (error) {
         console.error(error);
-        res.status(500).json({ error: 'Internal Server Error' });
+        return res.status(500).json({ error: 'Internal Server Error' });
     }
 });
 
